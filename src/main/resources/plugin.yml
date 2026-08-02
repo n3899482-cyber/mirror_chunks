@@ -1,0 +1,9 @@
+name: MirrorChunks
+description: '${description}'
+version: '${version}'
+
+main: me.nzoros.mirrorChunks.MirrorChunks
+api-version: '1.21'
+load: POSTWORLD
+
+authors: [ Nzoros10 ]
