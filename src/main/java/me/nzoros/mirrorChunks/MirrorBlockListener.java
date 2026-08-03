@@ -13,6 +13,7 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.block.data.Powerable;
 import org.bukkit.configuration.ConfigurationSection;
@@ -32,6 +33,9 @@ import org.bukkit.plugin.java.JavaPlugin;
 final class MirrorBlockListener implements Listener {
     private static final String CHANGES_PATH = "mirrored-changes";
     private static final int PHYSICS_UPDATES_PER_TICK = 4;
+    private static final BlockFace[] ADJACENT_FACES = {
+        BlockFace.DOWN, BlockFace.UP, BlockFace.NORTH, BlockFace.SOUTH, BlockFace.WEST, BlockFace.EAST
+    };
 
     private final JavaPlugin plugin;
     private final Map<UUID, Map<LocalPosition, MirroredChange>> changesByWorld = new HashMap<>();
@@ -108,7 +112,7 @@ final class MirrorBlockListener implements Listener {
         forEachTarget(source, target -> {
             if (target.getType() == source.getType() && target.getBlockData() instanceof Powerable) {
                 target.setBlockData(blockData, false);
-                queuePhysicsUpdate(target);
+                queuePhysicsUpdatesAround(target);
             }
         });
     }
@@ -160,14 +164,14 @@ final class MirrorBlockListener implements Listener {
             }
         } else if (target.getType().isAir()) {
             target.setBlockData(Bukkit.createBlockData(change.blockData()), false);
-            queuePhysicsUpdate(target);
+            queuePhysicsUpdatesAround(target);
         }
     }
 
     private void placeIfAir(Block target, BlockData blockData) {
         if (target.getType().isAir()) {
             target.setBlockData(blockData, false);
-            queuePhysicsUpdate(target);
+            queuePhysicsUpdatesAround(target);
         }
     }
 
@@ -196,7 +200,19 @@ final class MirrorBlockListener implements Listener {
 
     private void setTypeAndQueuePhysics(Block target, Material material) {
         target.setType(material, false);
-        queuePhysicsUpdate(target);
+        queuePhysicsUpdatesAround(target);
+    }
+
+    /**
+     * Block placement and removal affect more than the changed block itself.
+     * Refreshing adjacent blocks lets Minecraft recalculate redstone power,
+     * TNT priming, gravity blocks, fluids, and other neighbour-dependent logic.
+     */
+    private void queuePhysicsUpdatesAround(Block block) {
+        queuePhysicsUpdate(block);
+        for (BlockFace face : ADJACENT_FACES) {
+            queuePhysicsUpdate(block.getRelative(face));
+        }
     }
 
     private void queuePhysicsUpdate(Block block) {
