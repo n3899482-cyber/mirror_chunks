@@ -32,7 +32,12 @@ import org.bukkit.plugin.java.JavaPlugin;
 /** Mirrors player actions without force-loading chunks. */
 final class MirrorBlockListener implements Listener {
     private static final String CHANGES_PATH = "mirrored-changes";
-    private static final int PHYSICS_UPDATES_PER_TICK = 4;
+    /*
+     * Every copied block queues itself and its six neighbours. A limit of four
+     * meant that, with many loaded chunks, a water source could stay still for
+     * minutes before its normal Minecraft fluid tick was started.
+     */
+    private static final int PHYSICS_UPDATES_PER_TICK = 128;
     private static final BlockFace[] ADJACENT_FACES = {
         BlockFace.DOWN, BlockFace.UP, BlockFace.NORTH, BlockFace.SOUTH, BlockFace.WEST, BlockFace.EAST
     };
@@ -163,14 +168,14 @@ final class MirrorBlockListener implements Listener {
                 setTypeAndQueuePhysics(target, Material.FARMLAND);
             }
         } else if (target.getType().isAir()) {
-            target.setBlockData(Bukkit.createBlockData(change.blockData()), false);
+            target.setBlockData(Bukkit.createBlockData(change.blockData()), true);
             queuePhysicsUpdatesAround(target);
         }
     }
 
     private void placeIfAir(Block target, BlockData blockData) {
         if (target.getType().isAir()) {
-            target.setBlockData(blockData, false);
+            target.setBlockData(blockData, true);
             queuePhysicsUpdatesAround(target);
         }
     }
@@ -189,11 +194,6 @@ final class MirrorBlockListener implements Listener {
 
             Block block = update.world().getBlockAt(update.x(), update.y(), update.z());
             BlockData blockData = block.getBlockData();
-            if (block.getType() == Material.WATER || block.getType() == Material.LAVA) {
-                // Re-setting an unchanged fluid state does not schedule a fluid tick.
-                // Replace it once so Minecraft starts the normal fluid simulation.
-                block.setType(Material.AIR, false);
-            }
             block.setBlockData(blockData, true);
         }
     }
