@@ -1,11 +1,15 @@
 package me.nzoros.mirrorChunks;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Queue;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
@@ -28,6 +32,7 @@ import org.bukkit.event.player.PlayerBucketEmptyEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitRunnable;
 
 /** Mirrors player actions without force-loading chunks. */
 final class MirrorBlockListener implements Listener {
@@ -63,6 +68,12 @@ final class MirrorBlockListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockPlace(BlockPlaceEvent event) {
         Block source = event.getBlockPlaced();
+        // Hoe use can be reported as a block placement by some Paper versions.
+        // It must be handled as a TILL action below, never as a "place farmland
+        // into every air block" action.
+        if (source.getType() == Material.FARMLAND) {
+            return;
+        }
         BlockData blockData = source.getBlockData();
         changesFor(source.getWorld()).put(LocalPosition.from(source), MirroredChange.place(blockData.getAsString()));
         forEachTarget(source, target -> placeIfAir(target, blockData));
@@ -79,7 +90,8 @@ final class MirrorBlockListener implements Listener {
             plugin.getServer().getScheduler().runTask(plugin, () -> mirrorPowerState(clicked));
         }
         if (event.getItem() != null && event.getItem().getType().name().endsWith("_HOE")) {
-            plugin.getServer().getScheduler().runTask(plugin, () -> mirrorTilling(clicked));
+            Material originalType = clicked.getType();
+            plugin.getServer().getScheduler().runTask(plugin, () -> mirrorTilling(clicked, originalType));
         }
     }
 
@@ -122,14 +134,17 @@ final class MirrorBlockListener implements Listener {
         });
     }
 
-    private void mirrorTilling(Block source) {
-        if (source.getType() != Material.FARMLAND) {
+    private void mirrorTilling(Block source, Material originalType) {
+        // The interact event runs before the hoe changes the block. Checking
+        // both states avoids treating a click on existing farmland as a new
+        // tilling action.
+        if (!isTillableMaterial(originalType) || source.getType() != Material.FARMLAND) {
             return;
         }
 
         changesFor(source.getWorld()).put(LocalPosition.from(source), MirroredChange.till());
         forEachTarget(source, target -> {
-            if (target.getType() == Material.DIRT) {
+            if (canTillToFarmland(target)) {
                 setTypeAndQueuePhysics(target, Material.FARMLAND);
             }
         });
@@ -161,10 +176,15 @@ final class MirrorBlockListener implements Listener {
     }
 
     private void applyChange(Block target, MirroredChange change) {
+        // Old versions could save a hoe action as "place farmland". Do not
+        // replay that malformed rule into air, water, or the sky.
+        if (change.isFarmlandPlacement()) {
+            return;
+        }
         if (change.kind() == ChangeKind.BREAK) {
             setTypeAndQueuePhysics(target, Material.AIR);
         } else if (change.kind() == ChangeKind.TILL) {
-            if (target.getType() == Material.DIRT) {
+            if (canTillToFarmland(target)) {
                 setTypeAndQueuePhysics(target, Material.FARMLAND);
             }
         } else if (target.getType().isAir()) {
@@ -203,6 +223,18 @@ final class MirrorBlockListener implements Listener {
         queuePhysicsUpdatesAround(target);
     }
 
+    /** Mirrors the vanilla requirement that the block above the soil is air. */
+    private boolean canTillToFarmland(Block block) {
+        return isTillableMaterial(block.getType())
+            && block.getRelative(BlockFace.UP).getType().isAir();
+    }
+
+    private boolean isTillableMaterial(Material material) {
+        return material == Material.DIRT
+            || material == Material.GRASS_BLOCK
+            || material == Material.DIRT_PATH;
+    }
+
     /**
      * Block placement and removal affect more than the changed block itself.
      * Refreshing adjacent blocks lets Minecraft recalculate redstone power,
@@ -222,7 +254,11 @@ final class MirrorBlockListener implements Listener {
         }
     }
 
-    /** Visits equivalent positions only in chunks Paper has already loaded. */
+    /**
+     * Visits equivalent positions only in loaded chunks, expanding from the
+     * source in chunk-sized rings. Each ring after the first runs one tick
+     * later, giving the mirror effect a visible, gradual propagation.
+     */
     private void forEachTarget(Block source, BlockAction action) {
         int localX = source.getX() & 15;
         int localZ = source.getZ() & 15;
@@ -234,11 +270,49 @@ final class MirrorBlockListener implements Listener {
         if (y < sourceWorld.getMinHeight() || y >= sourceWorld.getMaxHeight()) {
             return;
         }
+        NavigableMap<Integer, List<Block>> targetsByDistance = new TreeMap<>();
         for (Chunk chunk : sourceWorld.getLoadedChunks()) {
             if (chunk.getX() == sourceChunkX && chunk.getZ() == sourceChunkZ) {
                 continue;
             }
-            action.apply(chunk.getBlock(localX, y, localZ));
+            int distance = Math.max(
+                Math.abs(chunk.getX() - sourceChunkX),
+                Math.abs(chunk.getZ() - sourceChunkZ)
+            );
+            targetsByDistance
+                .computeIfAbsent(distance, ignored -> new ArrayList<>())
+                .add(chunk.getBlock(localX, y, localZ));
+        }
+
+        if (targetsByDistance.isEmpty()) {
+            return;
+        }
+
+        applyTargetRing(targetsByDistance.pollFirstEntry().getValue(), action);
+        if (!targetsByDistance.isEmpty()) {
+            spreadTargetRings(new ArrayDeque<>(targetsByDistance.values()), action);
+        }
+    }
+
+    private void spreadTargetRings(Queue<List<Block>> targetRings, BlockAction action) {
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                List<Block> ring = targetRings.poll();
+                if (ring == null) {
+                    cancel();
+                    return;
+                }
+                applyTargetRing(ring, action);
+            }
+        }.runTaskTimer(plugin, 1L, 1L);
+    }
+
+    private void applyTargetRing(List<Block> targets, BlockAction action) {
+        for (Block target : targets) {
+            if (target.getWorld().isChunkLoaded(target.getX() >> 4, target.getZ() >> 4)) {
+                action.apply(target);
+            }
         }
     }
 
@@ -268,8 +342,10 @@ final class MirrorBlockListener implements Listener {
                 LocalPosition position = LocalPosition.parse(key);
                 String value = worldSection.getString(key);
                 MirroredChange change = value == null ? null : MirroredChange.fromStorage(value);
-                if (position != null && change != null) {
+                if (position != null && change != null && !change.isFarmlandPlacement()) {
                     changes.put(position, change);
+                } else if (change != null && change.isFarmlandPlacement()) {
+                    plugin.getLogger().warning("Discarding old invalid farmland placement rule: " + worldKey + "/" + key);
                 } else {
                     plugin.getLogger().warning("Ignoring invalid saved mirror change: " + worldKey + "/" + key);
                 }
@@ -350,6 +426,10 @@ final class MirrorBlockListener implements Listener {
                 case PLACE -> PLACE_PREFIX + blockData;
                 case TILL -> TILL;
             };
+        }
+
+        boolean isFarmlandPlacement() {
+            return kind == ChangeKind.PLACE && blockData.startsWith("minecraft:farmland");
         }
     }
 
