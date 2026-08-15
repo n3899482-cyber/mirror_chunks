@@ -49,8 +49,7 @@ because their data cannot safely be mirrored as BlockData.
 ## Publishing
 
 Release notes, platform-ready descriptions, and the publishing checklist are in
-[`docs/release/`](docs/release/). The square project icon is
-[`assets/mirrorchunks-icon.png`](assets/mirrorchunks-icon.png).
+[`docs/release/`](docs/release/).
 
 The existing CurseForge page is
 [MirrorChunks on CurseForge](https://www.curseforge.com/minecraft/bukkit-plugins/mirror-chunks).

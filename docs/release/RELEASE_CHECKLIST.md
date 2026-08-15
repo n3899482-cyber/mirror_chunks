@@ -22,7 +22,6 @@
 ## CurseForge
 
 - [ ] Use the existing project: https://www.curseforge.com/minecraft/bukkit-plugins/mirror-chunks
-- [ ] Upload `assets/mirrorchunks-icon.png` as the square project icon.
 - [ ] Paste the Summary and Description from `PLATFORM_COPY.md`.
 - [ ] Upload the built JAR as a Release after verification.
 - [ ] Select Paper 1.21.11 as the supported game version.
