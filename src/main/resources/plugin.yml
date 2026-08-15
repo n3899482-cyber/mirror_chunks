@@ -7,3 +7,14 @@ api-version: '1.21'
 load: POSTWORLD
 
 authors: [ Nzoros10 ]
+
+commands:
+  mirrorchunks:
+    description: Configures MirrorChunks.
+    usage: /mirrorchunks help
+    permission: mirrorchunks.admin
+
+permissions:
+  mirrorchunks.admin:
+    description: Allows administering MirrorChunks.
+    default: op

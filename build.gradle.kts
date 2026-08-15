@@ -18,6 +18,13 @@ java {
 }
 
 tasks {
+    jar {
+        archiveBaseName.set("MirrorChunks")
+        manifest {
+            attributes("Implementation-Version" to project.version)
+        }
+    }
+
     runServer {
         // Configure the Minecraft version for our task.
         // This is the only required configuration besides applying the plugin.

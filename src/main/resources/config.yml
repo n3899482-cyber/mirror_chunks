@@ -1,0 +1,20 @@
+settings:
+  block-place:
+    enabled: true
+    replace-existing-blocks: true
+  block-break:
+    enabled: true
+  tilling:
+    enabled: true
+  fluids:
+    enabled: true
+  power-state:
+    enabled: true
+  spawn-eggs:
+    enabled: true
+
+performance:
+  max-physics-updates-per-tick: 128
+
+debug:
+  enabled: false

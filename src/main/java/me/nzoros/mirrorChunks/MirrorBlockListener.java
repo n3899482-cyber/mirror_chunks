@@ -11,6 +11,8 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
+import me.nzoros.mirrorChunks.core.MirrorOperation;
+import me.nzoros.mirrorChunks.core.MirrorSettings;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
@@ -18,6 +20,7 @@ import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
+import org.bukkit.block.TileState;
 import org.bukkit.block.data.BlockData;
 import org.bukkit.block.data.Powerable;
 import org.bukkit.configuration.ConfigurationSection;
@@ -42,31 +45,40 @@ final class MirrorBlockListener implements Listener {
      * meant that, with many loaded chunks, a water source could stay still for
      * minutes before its normal Minecraft fluid tick was started.
      */
-    private static final int PHYSICS_UPDATES_PER_TICK = 128;
     private static final BlockFace[] ADJACENT_FACES = {
         BlockFace.DOWN, BlockFace.UP, BlockFace.NORTH, BlockFace.SOUTH, BlockFace.WEST, BlockFace.EAST
     };
 
     private final JavaPlugin plugin;
+    private final PaperConfigManager configManager;
     private final Map<UUID, Map<LocalPosition, MirroredChange>> changesByWorld = new HashMap<>();
     private final Queue<PhysicsUpdate> pendingPhysicsUpdates = new ArrayDeque<>();
     private final Set<PhysicsUpdate> queuedPhysicsUpdates = new HashSet<>();
 
-    MirrorBlockListener(JavaPlugin plugin) {
+    MirrorBlockListener(JavaPlugin plugin, PaperConfigManager configManager) {
         this.plugin = plugin;
+        this.configManager = configManager;
         loadChanges();
         plugin.getServer().getScheduler().runTaskTimer(plugin, this::processPhysicsUpdates, 1L, 1L);
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockBreak(BlockBreakEvent event) {
+        MirrorSettings settings = configManager.settings();
+        if (!settings.blockBreakEnabled()) {
+            return;
+        }
         Block source = event.getBlock();
         changesFor(source.getWorld()).put(LocalPosition.from(source), MirroredChange.breakBlock());
-        forEachTarget(source, target -> setTypeAndQueuePhysics(target, Material.AIR));
+        forEachTarget(source, settings, target -> setTypeAndQueuePhysics(target, Material.AIR));
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockPlace(BlockPlaceEvent event) {
+        MirrorSettings settings = configManager.settings();
+        if (!settings.blockPlaceEnabled()) {
+            return;
+        }
         Block source = event.getBlockPlaced();
         // Hoe use can be reported as a block placement by some Paper versions.
         // It must be handled as a TILL action below, never as a "place farmland
@@ -76,7 +88,7 @@ final class MirrorBlockListener implements Listener {
         }
         BlockData blockData = source.getBlockData();
         changesFor(source.getWorld()).put(LocalPosition.from(source), MirroredChange.place(blockData.getAsString()));
-        forEachTarget(source, target -> placeIfAir(target, blockData));
+        forEachTarget(source, settings, target -> placeBlock(target, blockData, settings.replaceExistingBlocks()));
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -86,30 +98,39 @@ final class MirrorBlockListener implements Listener {
         }
 
         Block clicked = event.getClickedBlock();
-        if (clicked.getBlockData() instanceof Powerable) {
-            plugin.getServer().getScheduler().runTask(plugin, () -> mirrorPowerState(clicked));
+        MirrorSettings settings = configManager.settings();
+        if (settings.powerStateEnabled() && clicked.getBlockData() instanceof Powerable) {
+            plugin.getServer().getScheduler().runTask(plugin, () -> mirrorPowerState(clicked, settings));
         }
-        if (event.getItem() != null && event.getItem().getType().name().endsWith("_HOE")) {
+        if (settings.tillingEnabled() && event.getItem() != null && event.getItem().getType().name().endsWith("_HOE")) {
             Material originalType = clicked.getType();
-            plugin.getServer().getScheduler().runTask(plugin, () -> mirrorTilling(clicked, originalType));
+            plugin.getServer().getScheduler().runTask(plugin, () -> mirrorTilling(clicked, originalType, settings));
         }
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBucketEmpty(PlayerBucketEmptyEvent event) {
+        MirrorSettings settings = configManager.settings();
+        if (!settings.fluidsEnabled()) {
+            return;
+        }
         Block fluidSource = event.getBlockClicked().getRelative(event.getBlockFace());
-        plugin.getServer().getScheduler().runTask(plugin, () -> mirrorFluid(fluidSource));
+        plugin.getServer().getScheduler().runTask(plugin, () -> mirrorFluid(fluidSource, settings));
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onSpawnEgg(CreatureSpawnEvent event) {
+        MirrorSettings settings = configManager.settings();
+        if (!settings.spawnEggsEnabled()) {
+            return;
+        }
         if (event.getSpawnReason() != CreatureSpawnEvent.SpawnReason.SPAWNER_EGG) {
             return;
         }
 
         Location sourceLocation = event.getLocation();
         Block source = sourceLocation.getBlock();
-        forEachTarget(source, target -> {
+        forEachTarget(source, settings, target -> {
             Location targetLocation = new Location(target.getWorld(), target.getX() + 0.5, sourceLocation.getY(), target.getZ() + 0.5);
             target.getWorld().spawnEntity(targetLocation, event.getEntity().getType());
         });
@@ -117,16 +138,16 @@ final class MirrorBlockListener implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onChunkLoad(ChunkLoadEvent event) {
-        applySavedChanges(event.getChunk());
+        applySavedChanges(event.getChunk(), configManager.settings());
     }
 
-    private void mirrorPowerState(Block source) {
+    private void mirrorPowerState(Block source, MirrorSettings settings) {
         BlockData blockData = source.getBlockData();
         if (!(blockData instanceof Powerable)) {
             return;
         }
 
-        forEachTarget(source, target -> {
+        forEachTarget(source, settings, target -> {
             if (target.getType() == source.getType() && target.getBlockData() instanceof Powerable) {
                 target.setBlockData(blockData, false);
                 queuePhysicsUpdatesAround(target);
@@ -134,7 +155,7 @@ final class MirrorBlockListener implements Listener {
         });
     }
 
-    private void mirrorTilling(Block source, Material originalType) {
+    private void mirrorTilling(Block source, Material originalType, MirrorSettings settings) {
         // The interact event runs before the hoe changes the block. Checking
         // both states avoids treating a click on existing farmland as a new
         // tilling action.
@@ -143,24 +164,24 @@ final class MirrorBlockListener implements Listener {
         }
 
         changesFor(source.getWorld()).put(LocalPosition.from(source), MirroredChange.till());
-        forEachTarget(source, target -> {
+        forEachTarget(source, settings, target -> {
             if (canTillToFarmland(target)) {
                 setTypeAndQueuePhysics(target, Material.FARMLAND);
             }
         });
     }
 
-    private void mirrorFluid(Block source) {
+    private void mirrorFluid(Block source, MirrorSettings settings) {
         if (source.getType() != Material.WATER && source.getType() != Material.LAVA) {
             return;
         }
 
         BlockData blockData = source.getBlockData();
         changesFor(source.getWorld()).put(LocalPosition.from(source), MirroredChange.place(blockData.getAsString()));
-        forEachTarget(source, target -> placeIfAir(target, blockData));
+        forEachTarget(source, settings, target -> placeBlock(target, blockData, settings.replaceExistingBlocks()));
     }
 
-    private void applySavedChanges(Chunk chunk) {
+    private void applySavedChanges(Chunk chunk, MirrorSettings settings) {
         World world = chunk.getWorld();
         Map<LocalPosition, MirroredChange> changes = changesByWorld.get(world.getUID());
         if (changes == null) {
@@ -170,32 +191,38 @@ final class MirrorBlockListener implements Listener {
         for (Map.Entry<LocalPosition, MirroredChange> entry : changes.entrySet()) {
             LocalPosition position = entry.getKey();
             if (position.y() >= world.getMinHeight() && position.y() < world.getMaxHeight()) {
-                applyChange(chunk.getBlock(position.x(), position.y(), position.z()), entry.getValue());
+                applyChange(chunk.getBlock(position.x(), position.y(), position.z()), entry.getValue(), settings);
             }
         }
     }
 
-    private void applyChange(Block target, MirroredChange change) {
+    private void applyChange(Block target, MirroredChange change, MirrorSettings settings) {
         // Old versions could save a hoe action as "place farmland". Do not
         // replay that malformed rule into air, water, or the sky.
         if (change.isFarmlandPlacement()) {
             return;
         }
-        if (change.kind() == ChangeKind.BREAK) {
+        if (change.kind() == ChangeKind.BREAK && settings.blockBreakEnabled()) {
             setTypeAndQueuePhysics(target, Material.AIR);
-        } else if (change.kind() == ChangeKind.TILL) {
+        } else if (change.kind() == ChangeKind.TILL && settings.tillingEnabled()) {
             if (canTillToFarmland(target)) {
                 setTypeAndQueuePhysics(target, Material.FARMLAND);
             }
-        } else if (target.getType().isAir()) {
-            target.setBlockData(Bukkit.createBlockData(change.blockData()), true);
-            queuePhysicsUpdatesAround(target);
+        } else if (change.kind() == ChangeKind.PLACE && settings.blockPlaceEnabled()) {
+            placeBlock(target, Bukkit.createBlockData(change.blockData()), settings.replaceExistingBlocks());
         }
     }
 
-    private void placeIfAir(Block target, BlockData blockData) {
-        if (target.getType().isAir()) {
-            target.setBlockData(blockData, true);
+    private void placeBlock(Block target, BlockData blockData, boolean replaceBlocks) {
+        if (replaceBlocks && target.getState(false) instanceof TileState) {
+            debug("Skipped block entity at " + target.getX() + "," + target.getY() + "," + target.getZ());
+            return;
+        }
+        if (replaceBlocks || target.getType().isAir()) {
+            // Applying physics here can synchronously load neighbouring chunks.
+            // During ChunkLoadEvent that recursively invokes saved-change replay.
+            // The throttled queue below only touches chunks already reported loaded.
+            target.setBlockData(blockData, false);
             queuePhysicsUpdatesAround(target);
         }
     }
@@ -205,7 +232,9 @@ final class MirrorBlockListener implements Listener {
      * player event can cause Paper to synchronously wait for chunk generation.
      */
     private void processPhysicsUpdates() {
-        for (int processed = 0; processed < PHYSICS_UPDATES_PER_TICK && !pendingPhysicsUpdates.isEmpty(); processed++) {
+        int limit = configManager.settings().maxPhysicsUpdatesPerTick();
+        int processed = 0;
+        for (; processed < limit && !pendingPhysicsUpdates.isEmpty(); processed++) {
             PhysicsUpdate update = pendingPhysicsUpdates.remove();
             queuedPhysicsUpdates.remove(update);
             if (!update.world().isChunkLoaded(update.chunkX(), update.chunkZ())) {
@@ -215,6 +244,9 @@ final class MirrorBlockListener implements Listener {
             Block block = update.world().getBlockAt(update.x(), update.y(), update.z());
             BlockData blockData = block.getBlockData();
             block.setBlockData(blockData, true);
+        }
+        if (processed > 0) {
+            debug("Physics queue size: " + pendingPhysicsUpdates.size());
         }
     }
 
@@ -259,7 +291,7 @@ final class MirrorBlockListener implements Listener {
      * source in chunk-sized rings. Each ring after the first runs one tick
      * later, giving the mirror effect a visible, gradual propagation.
      */
-    private void forEachTarget(Block source, BlockAction action) {
+    private void forEachTarget(Block source, MirrorSettings settings, BlockAction action) {
         int localX = source.getX() & 15;
         int localZ = source.getZ() & 15;
         int y = source.getY();
@@ -268,6 +300,7 @@ final class MirrorBlockListener implements Listener {
         int sourceChunkZ = source.getChunk().getZ();
 
         if (y < sourceWorld.getMinHeight() || y >= sourceWorld.getMaxHeight()) {
+            debug("Ignored out-of-range mirror operation.");
             return;
         }
         NavigableMap<Integer, List<Block>> targetsByDistance = new TreeMap<>();
@@ -285,17 +318,24 @@ final class MirrorBlockListener implements Listener {
         }
 
         if (targetsByDistance.isEmpty()) {
+            debug("No loaded target chunks for source chunk " + sourceChunkX + "," + sourceChunkZ);
             return;
         }
 
-        applyTargetRing(targetsByDistance.pollFirstEntry().getValue(), action);
+        MirrorOperation operation = new MirrorOperation(settings, sourceChunkX, sourceChunkZ, localX, y, localZ);
+        int targetCount = targetsByDistance.values().stream().mapToInt(List::size).sum();
+        debug("Source chunk " + sourceChunkX + "," + sourceChunkZ + " local " + localX + "," + y + "," + localZ
+            + ", targets: " + targetCount + ", rings: " + targetsByDistance.size());
+
+        applyTargetRing(targetsByDistance.pollFirstEntry().getValue(), action, operation, 1);
         if (!targetsByDistance.isEmpty()) {
-            spreadTargetRings(new ArrayDeque<>(targetsByDistance.values()), action);
+            spreadTargetRings(new ArrayDeque<>(targetsByDistance.values()), action, operation);
         }
     }
 
-    private void spreadTargetRings(Queue<List<Block>> targetRings, BlockAction action) {
+    private void spreadTargetRings(Queue<List<Block>> targetRings, BlockAction action, MirrorOperation operation) {
         new BukkitRunnable() {
+            private int ring = 2;
             @Override
             public void run() {
                 List<Block> ring = targetRings.poll();
@@ -303,16 +343,24 @@ final class MirrorBlockListener implements Listener {
                     cancel();
                     return;
                 }
-                applyTargetRing(ring, action);
+                applyTargetRing(ring, action, operation, this.ring++);
             }
         }.runTaskTimer(plugin, 1L, 1L);
     }
 
-    private void applyTargetRing(List<Block> targets, BlockAction action) {
+    private void applyTargetRing(List<Block> targets, BlockAction action, MirrorOperation operation, int ring) {
+        debug("Applying ring " + ring + " to " + targets.size() + " chunks from "
+            + operation.sourceChunkX() + "," + operation.sourceChunkZ());
         for (Block target : targets) {
             if (target.getWorld().isChunkLoaded(target.getX() >> 4, target.getZ() >> 4)) {
                 action.apply(target);
             }
+        }
+    }
+
+    private void debug(String message) {
+        if (configManager.settings().debugEnabled()) {
+            plugin.getLogger().info("[debug] " + message);
         }
     }
 
